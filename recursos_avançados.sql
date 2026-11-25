@@ -1,84 +1,169 @@
-
+-- Recursos avancados 
 
 USE clinic_flow;
 
-
--- PROCEDURES, FUNCTION E TRIGGER
-
-
 DELIMITER //
 
--- ------------------------------------------------------------
--- PROCEDURE 1: Gerar uma nova senha para um paciente.
--- Recebe o codigo da senha, o paciente e a fila.
--- Registra automaticamente a data e hora da chegada.
--- ------------------------------------------------------------
-
+-- Procedure: gerar senha sem associar paciente
 CREATE PROCEDURE sp_gerar_senha(
-    IN p_codigo VARCHAR(10),
-    IN p_id_paciente INT,
+    IN p_codigo VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
     IN p_id_fila INT
 )
 BEGIN
+    DECLARE v_codigo VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+    SET v_codigo = TRIM(p_codigo);
+
+    IF p_codigo IS NULL OR v_codigo = '' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Codigo da senha obrigatorio.';
+    END IF;
+
+    IF p_id_fila IS NULL OR NOT EXISTS (
+        SELECT 1 FROM filas WHERE id_fila = p_id_fila
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Fila nao encontrada.';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM senhas WHERE codigo = v_codigo
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Codigo de senha ja existe.';
+    END IF;
+
     INSERT INTO senhas (
-        codigo,
-        id_paciente,
-        id_fila,
-        data_chegada,
-        status
+        codigo, id_paciente, id_fila, data_chegada, status
     )
     VALUES (
-        p_codigo,
-        p_id_paciente,
-        p_id_fila,
-        NOW(),
-        'Aguardando'
+        v_codigo, NULL, p_id_fila, NOW(), 'aguardando'
     );
 END //
 
+-- Procedure: associar paciente a uma senha gerada
+CREATE PROCEDURE sp_associar_paciente_senha(
+    IN p_id_senha INT,
+    IN p_id_paciente INT
+)
+BEGIN
+    DECLARE v_paciente_atual INT DEFAULT NULL;
+    DECLARE v_status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL;
+    DECLARE v_encontrada BOOLEAN DEFAULT TRUE;
 
--- ------------------------------------------------------------
--- PROCEDURE 2: Registrar o inicio de um atendimento.
--- Registra o atendimento e atualiza o status da senha
--- para "Em atendimento".
--- ------------------------------------------------------------
+    DECLARE CONTINUE HANDLER FOR NOT FOUND
+        SET v_encontrada = FALSE;
 
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    SELECT id_paciente, status
+    INTO v_paciente_atual, v_status
+    FROM senhas
+    WHERE id_senha = p_id_senha
+    FOR UPDATE;
+
+    IF NOT v_encontrada THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Senha nao encontrada.';
+    END IF;
+
+    IF p_id_paciente IS NULL OR NOT EXISTS (
+        SELECT 1 FROM pacientes WHERE id_paciente = p_id_paciente
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Paciente nao encontrado.';
+    END IF;
+
+    IF v_paciente_atual IS NOT NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Esta senha ja possui um paciente associado.';
+    END IF;
+
+    IF v_status <> 'aguardando' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Somente senhas aguardando podem receber um paciente.';
+    END IF;
+
+    UPDATE senhas
+    SET id_paciente = p_id_paciente
+    WHERE id_senha = p_id_senha;
+
+    COMMIT;
+END //
+
+-- Procedure: registrar atendimento com transacao
 CREATE PROCEDURE sp_registrar_atendimento(
     IN p_id_senha INT,
     IN p_id_atendente INT
 )
 BEGIN
-    INSERT INTO atendimentos (
-        id_senha,
-        id_atendente,
-        inicio,
-        fim
-    )
-    VALUES (
-        p_id_senha,
-        p_id_atendente,
-        NOW(),
-        NULL
-    );
+    DECLARE v_paciente INT DEFAULT NULL;
+    DECLARE v_status VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL;
+    DECLARE v_encontrada BOOLEAN DEFAULT TRUE;
+
+    DECLARE CONTINUE HANDLER FOR NOT FOUND
+        SET v_encontrada = FALSE;
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    SELECT id_paciente, status
+    INTO v_paciente, v_status
+    FROM senhas
+    WHERE id_senha = p_id_senha
+    FOR UPDATE;
+
+    IF NOT v_encontrada THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Senha nao encontrada.';
+    END IF;
+
+    IF v_paciente IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Senha sem paciente associado.';
+    END IF;
+
+    IF v_status <> 'aguardando' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Senha nao esta aguardando atendimento.';
+    END IF;
+
+    IF p_id_atendente IS NULL OR NOT EXISTS (
+        SELECT 1 FROM atendente WHERE id_atendente = p_id_atendente
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Atendente nao encontrado.';
+    END IF;
+
+    INSERT INTO atendimentos (id_senha, id_atendente, inicio, fim)
+    VALUES (p_id_senha, p_id_atendente, NOW(), NULL);
 
     UPDATE senhas
-    SET status = 'Em atendimento'
+    SET status = 'em atendimento'
     WHERE id_senha = p_id_senha;
+
+    COMMIT;
 END //
 
-
--- ------------------------------------------------------------
--- FUNCTION: Recebe o ID do atendimento e retorna a duracao
--- em minutos. Retorna NULL se ainda nao estiver finalizado.
--- ------------------------------------------------------------
-
+-- Function: calcular tempo de atendimento
 CREATE FUNCTION fn_tempo_atendimento(
     p_id_atendimento INT
 )
 RETURNS INT
 READS SQL DATA
 BEGIN
-    DECLARE v_tempo INT;
+    DECLARE v_tempo INT DEFAULT NULL;
 
     SELECT TIMESTAMPDIFF(MINUTE, inicio, fim)
     INTO v_tempo
@@ -88,143 +173,54 @@ BEGIN
     RETURN v_tempo;
 END //
 
-
--- ------------------------------------------------------------
--- TRIGGER: Quando o atendimento recebe uma data de fim,
--- o status da senha passa automaticamente para "Finalizada".
--- ------------------------------------------------------------
-
+-- Trigger: finalizar senha
 CREATE TRIGGER trg_finalizar_senha
 AFTER UPDATE ON atendimentos
 FOR EACH ROW
 BEGIN
     IF OLD.fim IS NULL AND NEW.fim IS NOT NULL THEN
         UPDATE senhas
-        SET status = 'Finalizada'
+        SET status = 'finalizada'
         WHERE id_senha = NEW.id_senha;
     END IF;
 END //
 
 DELIMITER ;
 
-
--- ============================================================
--- VIEWS
--- ============================================================
-
--- ------------------------------------------------------------
--- VIEW 1: Visualizar fila de pacientes.
--- Mostra o paciente, sua senha, a fila, o horario de chegada
--- e o status.
--- ------------------------------------------------------------
-
+-- View: fila de pacientes
 CREATE VIEW vw_fila_pacientes AS
 SELECT
-    pacientes.nome AS paciente,
-    senhas.codigo AS senha,
-    filas.nome AS fila,
-    senhas.data_chegada,
-    senhas.status
-FROM senhas
-INNER JOIN pacientes
-    ON senhas.id_paciente = pacientes.id_paciente
-INNER JOIN filas
-    ON senhas.id_fila = filas.id_fila;
+    p.nome AS paciente,
+    s.codigo AS senha,
+    f.nome AS fila,
+    f.prioridade,
+    s.data_chegada,
+    s.status
+FROM senhas s
+LEFT JOIN pacientes p
+    ON p.id_paciente = s.id_paciente
+JOIN filas f
+    ON f.id_fila = s.id_fila;
 
-
--- ------------------------------------------------------------
--- VIEW 2: Historico de atendimentos.
--- Mostra o paciente, o atendente, os horarios e a duracao.
---
--- CORRECAO: no banco, a tabela se chama "atendente"
--- (singular), e nao "atendentes" (plural).
--- ------------------------------------------------------------
-
+-- View: historico de atendimentos
 CREATE VIEW vw_historico_atendimentos AS
 SELECT
-    pacientes.nome AS paciente,
-    senhas.codigo AS senha,
-    atendente.nome AS atendente,
-    atendimentos.inicio,
-    atendimentos.fim,
-    TIMESTAMPDIFF(
-        MINUTE,
-        atendimentos.inicio,
-        atendimentos.fim
-    ) AS tempo_minutos
-FROM atendimentos
-INNER JOIN senhas
-    ON atendimentos.id_senha = senhas.id_senha
-INNER JOIN pacientes
-    ON senhas.id_paciente = pacientes.id_paciente
-INNER JOIN atendente
-    ON atendimentos.id_atendente = atendente.id_atendente;
+    p.nome AS paciente,
+    s.codigo AS senha,
+    a.nome AS atendente,
+    atd.inicio,
+    atd.fim,
+    TIMESTAMPDIFF(MINUTE, atd.inicio, atd.fim) AS tempo_minutos
+FROM atendimentos atd
+JOIN senhas s
+    ON s.id_senha = atd.id_senha
+LEFT JOIN pacientes p
+    ON p.id_paciente = s.id_paciente
+JOIN atendente a
+    ON a.id_atendente = atd.id_atendente;
 
-
--- TRANSACAO
-
-
--- ------------------------------------------------------------
--- PROCEDURE: Registrar atendimento utilizando transacao.
--- Demonstra START TRANSACTION, COMMIT e ROLLBACK.
--- Se ocorrer algum erro SQL, as operacoes sao desfeitas.
--- ------------------------------------------------------------
-
-DELIMITER //
-
-CREATE PROCEDURE sp_registrar_atendimento_transacao(
-    IN p_id_senha INT,
-    IN p_id_atendente INT
-)
-BEGIN
-    DECLARE EXIT HANDLER FOR SQLEXCEPTION
-    BEGIN
-        ROLLBACK;
-        RESIGNAL;
-    END;
-
-    START TRANSACTION;
-
-    -- Insere o atendimento.
-    INSERT INTO atendimentos (
-        id_senha,
-        id_atendente,
-        inicio,
-        fim
-    )
-    VALUES (
-        p_id_senha,
-        p_id_atendente,
-        NOW(),
-        NULL
-    );
-
-    -- Atualiza o status da senha.
-    UPDATE senhas
-    SET status = 'Em atendimento'
-    WHERE id_senha = p_id_senha;
-
-    COMMIT;
-END //
-
-DELIMITER ;
-
-
--- CONFERENCIA DOS RECURSOS CRIADOS
-
--- Consultar procedures.
-SHOW PROCEDURE STATUS
-WHERE Db = 'clinic_flow';
-
--- Consultar functions.
-SHOW FUNCTION STATUS
-WHERE Db = 'clinic_flow';
-
--- Consultar triggers.
-SHOW TRIGGERS
-FROM clinic_flow;
-
--- Consultar views.
-SHOW FULL TABLES
-WHERE Table_type = 'VIEW';
-
+-- Conferencia dos objetos criados
+SHOW PROCEDURE STATUS WHERE Db = 'clinic_flow';
+SHOW FUNCTION STATUS WHERE Db = 'clinic_flow';
+SHOW TRIGGERS FROM clinic_flow;
+SHOW FULL TABLES FROM clinic_flow WHERE Table_type = 'VIEW';
