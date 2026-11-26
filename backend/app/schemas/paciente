@@ -1,0 +1,19 @@
+
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Optional
+
+
+class PacienteBase(BaseModel):
+    nome: str = Field(..., min_length=2, max_length=100)
+    cpf: str = Field(..., min_length=11, max_length=14)
+    telefone: Optional[str] = Field(default=None, max_length=20)
+
+
+class PacienteCreate(PacienteBase):
+    pass
+
+
+class PacienteResponse(PacienteBase):
+    id_paciente: int
+
+    model_config = ConfigDict(from_attributes=True)
