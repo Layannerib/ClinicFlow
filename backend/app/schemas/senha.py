@@ -1,13 +1,12 @@
 
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Literal
+from typing import Literal
 from datetime import datetime
 
 
 class SenhaBase(BaseModel):
     codigo: str = Field(..., min_length=1, max_length=10)
     id_fila: int
-    id_paciente: Optional[int] = None
 
 
 class SenhaCreate(SenhaBase):
@@ -18,8 +17,11 @@ class SenhaAssociarPaciente(BaseModel):
     id_paciente: int
 
 
-class SenhaResponse(SenhaBase):
+class SenhaResponse(BaseModel):
     id_senha: int
+    codigo: str
+    id_paciente: int | None = None
+    id_fila: int
     data_chegada: datetime
     status: Literal[
         "aguardando",
